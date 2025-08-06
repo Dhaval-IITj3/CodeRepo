@@ -82,6 +82,12 @@ if __name__ == "__main__":
     mycat.speak()
     mycat.intro()
 
-    print(Cat.mro())
+    # MRO method returns the method resolution order
+    """MRO determines the sequence in which base classes are searched 
+    when a method or attribute is accessed on an object. 
+    This is crucial in multiple inheritance scenarios 
+    where a method might be defined in more than one parent class.
+    """
+    print(f"Cat.mro(): {Cat.mro()}")
 
     Domestic.speak(mycat)
