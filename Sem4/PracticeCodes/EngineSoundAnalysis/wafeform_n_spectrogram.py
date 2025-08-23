@@ -6,6 +6,13 @@ from pathlib import Path
 import os
 import shutil
 
+
+"""
+✅ Rule of thumb:
+Use Librosa when your main goal is signal analysis, feature extraction, and visualization.
+Use Torchaudio when you’re building a deep learning model in PyTorch and want an efficient, end-to-end GPU pipeline.
+"""
+
 def plot_audio(file_path):
     # Step 1: Load OGG file
     # file_path = 'D:\IIT_J\Repo\CodeRepo\Sem4\PracticeCodes\Resources\Before\Activa6g_Before.ogg'  # Replace with your OGG file path
@@ -160,11 +167,10 @@ if __name__ == "__main__":
     engines = list(set(engines))
 
     os.makedirs('Plots', exist_ok=True)
-    # Clear any existing plots
-    shutil.rmtree(os.path.join('Plots'))
-
     os.makedirs('Plots/waveform', exist_ok=True)
     os.makedirs('Plots/spectrogram', exist_ok=True)
+    shutil.rmtree(os.path.join('Plots', 'waveform'))
+    shutil.rmtree(os.path.join('Plots', 'spectrogram'))
 
     # Step 2: Load Data (assumes folders like 'engine1_before/', etc.)
     features = []
