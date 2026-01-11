@@ -9,18 +9,21 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
+import librosa
+import math
+
 
 # --------------------------- Paths ---------------------------
 DATA_DIR_NAME = 'Resources\\EngineSoundsNewBikes'
 BASE_DIR = Path(__file__).parent
 BASE_DIR = BASE_DIR.parent.resolve()  # Go one level up
 PLOT_DIR = BASE_DIR / 'EngineSoundAnalysis' / 'Plots' / 'NewBikeFeatureExtraction'
-DATA_DIR = BASE_DIR / DATA_DIR_NAME
+RESOURCE_DIR = BASE_DIR / DATA_DIR_NAME
 
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
-if not DATA_DIR.exists():
-    print(f"Error: Data directory {DATA_DIR} does not exist.")
+if not RESOURCE_DIR.exists():
+    print(f"Error: Data directory {RESOURCE_DIR} does not exist.")
     exit()
 
 # ------------------- Feature Names (Fixed 12-element vector) -------------------
@@ -122,7 +125,7 @@ def load_audio(filename):
 def extract_features(filename):
     y, sr = load_audio(filename)
     if y is None:
-        return None
+        return None, None, None, None
 
     window_size = int(0.015 * sr)  # 15 ms window
     hop_size = int(0.005 * sr)     # 5 ms hop
@@ -130,9 +133,12 @@ def extract_features(filename):
         window_size = 512
         hop_size = 128
 
-    f, t, Zxx = stft(y, fs=sr, window='hamming', nperseg=window_size, noverlap=window_size - hop_size)
-    mag = np.abs(Zxx)
-    freqs = f
+    # Using power spectrogram (magnitude squared)
+    S = librosa.stft(y, n_fft=window_size, hop_length=hop_size)
+
+    # For original spectral features we use magnitude
+    mag = np.abs(S)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=window_size)
 
     frame_feats = []
     pitches = []
@@ -140,27 +146,27 @@ def extract_features(filename):
     prev_mag = None
 
     for i in range(mag.shape[1]):
-        S = mag[:, i] + 1e-8  # Avoid zero division
-        centroid = spectral_centroid(S, freqs)
+        frame = mag[:, i] + 1e-8  # Avoid zero division
+        centroid = spectral_centroid(frame, freqs)
 
         # Now compute spread (needed for skewness and kurtosis)
-        spread = spectral_spread(S, freqs, centroid)
+        spread = spectral_spread(frame, freqs, centroid)
 
         # Then skewness and kurtosis using all required params
-        skewness = spectral_skewness(S, freqs, centroid, spread)
-        kurtosis = spectral_kurtosis(S, freqs, centroid, spread)
+        skewness = spectral_skewness(frame, freqs, centroid, spread)
+        kurtosis = spectral_kurtosis(frame, freqs, centroid, spread)
 
         frame_feats.append([
             centroid,
-            spectral_crest(S),
-            spectral_decrease(S),
-            spectral_entropy(S),
-            spectral_flatness(S),
+            spectral_crest(frame),
+            spectral_decrease(frame),
+            spectral_entropy(frame),
+            spectral_flatness(frame),
             # flux inserted later as mean
             kurtosis,  # index 5 in base
-            spectral_rolloff(S, freqs),
+            spectral_rolloff(frame, freqs),
             skewness,  # index 7
-            spectral_slope(S, freqs),
+            spectral_slope(frame, freqs),
             spread
         ])
 
@@ -175,11 +181,11 @@ def extract_features(filename):
 
         # Flux
         if prev_mag is not None:
-            fluxes.append(spectral_flux(prev_mag, S))
-        prev_mag = S.copy()
+            fluxes.append(spectral_flux(prev_mag, frame))
+        prev_mag = frame.copy()
 
     # Compute means
-    mean_base = np.mean(frame_feats, axis=0)
+    mean_base = np.mean(np.array(frame_feats), axis=0)
     mean_flux = np.mean(fluxes) if fluxes else 0.0
     mean_pitch = np.mean(pitches)
 
@@ -187,35 +193,55 @@ def extract_features(filename):
     final_vector = np.insert(mean_base, 5, mean_flux)
     final_vector = np.append(final_vector, mean_pitch)
 
-    return final_vector
+    # === MFCC & Delta MFCC (time-series kept for plotting) ===
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=2048,
+                                hop_length=512, window='hamming', n_mels=64, fmax=8000)
+    delta_mfcc = librosa.feature.delta(mfcc)
+
+    return final_vector, mfcc, delta_mfcc, S
 
 # ------------------- Load Dataset (Scalable to Any Number of Bikes) -------------------
 def load_dataset():
-    features = []
+    features_list = []
+    mfccs_list = []
+    delta_mfccs_list = []
+    spectrograms_list = []
     labels = []
-    bike_names = []
+    bikenames = []
 
-    # Try folder-per-bike first
-    subdirs = [d for d in DATA_DIR.iterdir() if d.is_dir()]
+    subdirs = [d for d in RESOURCE_DIR.iterdir() if d.is_dir()]
     if subdirs:
-        bike_names = sorted([d.name for d in subdirs])
         for idx, folder in enumerate(subdirs):
             for file in folder.glob('*.ogg'):
-                feat = extract_features(str(file))
+                bikename = os.path.basename(file).split('.')[0]  # better than split('.')[0]
+                feat, mfcc, delta, spec = extract_features(str(file))
                 if feat is not None:
-                    features.append(feat)
+                    features_list.append(feat)
+                    mfccs_list.append(mfcc)
+                    delta_mfccs_list.append(delta)
+                    spectrograms_list.append(spec)
+                    bikenames.append(bikename)
                     labels.append(idx)
     else:
-        # Fallback: all .ogg files in root are individual bikes
-        ogg_files = sorted(DATA_DIR.glob('*.ogg'))
-        bike_names = [f.stem for f in ogg_files]
+        ogg_files = sorted(RESOURCE_DIR.glob('*.ogg'))
         for idx, file in enumerate(ogg_files):
-            feat = extract_features(str(file))
+            bikename = file.stem
+            feat, mfcc, delta, spec = extract_features(str(file))
             if feat is not None:
-                features.append(feat)
+                features_list.append(feat)
+                mfccs_list.append(mfcc)
+                delta_mfccs_list.append(delta)
+                spectrograms_list.append(spec)
+                bikenames.append(bikename)
                 labels.append(idx)
 
-    return np.array(features), np.array(labels), bike_names
+    return (np.array(features_list),
+            np.array(labels),
+            mfccs_list,  # keep as list (variable shape)
+            delta_mfccs_list,
+            bikenames,
+            spectrograms_list)
+
 
 # ------------------- PyTorch Classifier (Dynamic Output Size) -------------------
 class BikeClassifier(nn.Module):
@@ -237,45 +263,156 @@ class BikeClassifier(nn.Module):
         return self.network(x)
 
 # ------------------- Plotting: Bar Charts for Any Number of Bikes -------------------
-def plot_feature_comparisons(X, bike_names):
-    # Average per bike if multiple recordings
-    unique_labels, counts = np.unique(y, return_counts=True)
-    mean_features = []
-    for label in unique_labels:
-        bike_data = X[y == label]
-        mean_features.append(np.mean(bike_data, axis=0))
-    mean_features = np.array(mean_features)  # Shape: (n_bikes, 12)
+def plot_feature_comparisons(X, y, bike_names, feature_names):
+    unique_labels = np.unique(y)
+    mean_features = [np.mean(X[y == lbl], axis=0) for lbl in unique_labels]
+    mean_features = np.array(mean_features)
 
     bike_labels = [name.replace('_', ' ') for name in bike_names]
 
-    for i, name in enumerate(FEATURE_NAMES):
+    for i, name in enumerate(feature_names):
         plt.figure(figsize=(max(10, len(bike_names) * 0.8), 6))
         values = mean_features[:, i]
-
         bars = plt.bar(range(len(bike_labels)), values, color='teal', alpha=0.8, edgecolor='black')
         plt.scatter(range(len(bike_labels)), values, color='orange', s=80, zorder=5)
 
-        plt.title(f'{name} Across Different Bike Engines', fontsize=16, pad=20)
+        plt.title(f'{name} Across Different Bike Engines', fontsize=16)
         plt.xlabel('Bike Engine')
         plt.ylabel(name)
         plt.xticks(range(len(bike_labels)), bike_labels, rotation=45, ha='right')
         plt.grid(axis='y', alpha=0.3)
 
-        # Annotate values
         for bar, val in zip(bars, values):
-            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + np.max(values)*0.02,
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + np.max(values) * 0.02,
                      f'{val:.3f}', ha='center', va='bottom', fontsize=9)
 
         plt.tight_layout()
-        save_path = PLOT_DIR / f"{name.lower()}_comparison.png"
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(PLOT_DIR / f"{name.lower()}_comparison.png", dpi=150)
         plt.close()
-        print(f"Saved: {save_path}")
+
+
+# ------------------- Plotting: Heatmap for Any Number of Bikes -------------------
+def plot_mfcc_comparison(mfccs_list, bike_names, feature_type="MFCC"):
+    n_bikes = len(bike_names)
+    fig, axes = plt.subplots(n_bikes, 1, figsize=(14, 3*n_bikes), sharex=True)
+    if n_bikes == 1:
+        axes = [axes]
+
+    for idx, (mfcc, ax) in enumerate(zip(mfccs_list, axes)):
+        librosa.display.specshow(mfcc, x_axis='time', ax=ax, cmap='viridis')
+        ax.set_title(f'{feature_type} - {bike_names[idx]}')
+        ax.set_ylabel('MFCC Coefficients')
+
+    fig.suptitle(f'{feature_type} Heatmap Comparison Across Engines', fontsize=16, y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(PLOT_DIR / f"{feature_type.lower()}_comparison_all.png", dpi=150)
+    plt.close()
+
+
+# ------------------- Feature Extraction: Band Energy Ratio -------------------
+def calculate_split_frequency_bin(split_frequency, sample_rate, num_frequency_bins):
+    """
+    Calculate the FFT bin index corresponding to a given split frequency.
+    """
+    frequency_range = sample_rate / 2.0
+    frequency_delta_per_bin = frequency_range / (num_frequency_bins - 1)  # more precise
+    split_bin = math.floor(split_frequency / frequency_delta_per_bin)
+    # Clamp to valid range
+    split_bin = max(1, min(split_bin, num_frequency_bins - 1))
+    return int(split_bin)
+
+
+def band_energy_ratio(spectrogram, split_frequency, sample_rate):
+    """
+    Calculate Band Energy Ratio (low / high) for each time frame.
+
+    Parameters:
+    - spectrogram_power: numpy array of shape (freq_bins, time_frames) - already power (|S|**2)
+    - split_frequency: frequency in Hz to split low vs high band
+    - sample_rate: audio sampling rate
+
+    Returns:
+    - ber: numpy array of shape (time_frames,) with BER values per frame
+    """
+    split_frequency_bin = calculate_split_frequency_bin(split_frequency, sample_rate, len(spectrogram[0]))
+    band_energy_ratio = []
+
+    # calculate power spectrogram
+    power_spectrogram = np.abs(spectrogram) ** 2
+    power_spectrogram = power_spectrogram.T
+
+    # calculate BER value for each frame
+    for frame in power_spectrogram:
+        sum_power_low_frequencies = frame[:split_frequency_bin].sum()
+        sum_power_high_frequencies = frame[split_frequency_bin:].sum()
+        band_energy_ratio_current_frame = sum_power_low_frequencies / sum_power_high_frequencies
+        band_energy_ratio.append(band_energy_ratio_current_frame)
+
+    return np.array(band_energy_ratio)
+
+
+def plot_ber_time_series_grid(spectrograms_list, bikename_arry, y, sr=44100, hop_length=512):
+    """
+    Plot Band Energy Ratio time series in a grid of individual subplots,
+    one subplot per bike engine.
+    """
+    # Split frequency to use (you can change or make it a list)
+    split_frequency = 500  # Hz
+    bike_ber_data = []  # list of (bike_name, time, ber)
+
+    for i, bike in enumerate(bikename_arry):
+        ber = band_energy_ratio(spectrograms_list[i], split_frequency, sr)
+        frames = range(len(ber))
+        t = librosa.frames_to_time(frames, sr=sr, hop_length=hop_length)
+        bike_ber_data.append((bike, t, ber))
+
+    if not bike_ber_data:
+        print("No data available for BER plotting.")
+        return
+
+    n_bikes = len(bike_ber_data)
+
+    # Determine grid size (e.g. 3×4, 4×3, etc.)
+    cols = min(4, n_bikes)  # max 4 columns
+    rows = math.ceil(n_bikes / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3.5 * rows),
+                             sharex=True, sharey=False)
+
+    # Flatten axes for easy iteration
+    axes_flat = axes.ravel() if n_bikes > 1 else [axes]
+
+    for i, (bike_name, t, ber) in enumerate(bike_ber_data):
+        ax = axes_flat[i]
+
+        ax.plot(t, ber, linewidth=1.5)
+        ax.set_title(bike_name, fontsize=11, pad=8)
+        ax.set_xlabel('Time (s)' if i >= (rows - 1) * cols else '')
+        ax.set_ylabel('BER (Low/High)')
+        ax.grid(True, alpha=0.3, linestyle='--')
+
+        # Optional: log scale if values span many orders of magnitude
+        # ax.set_yscale('log')
+
+    # Hide unused subplots
+    for j in range(n_bikes, len(axes_flat)):
+        axes_flat[j].set_visible(False)
+
+    fig.suptitle(f'Band Energy Ratio (Low < {split_frequency} Hz / High) Time Evolution\nPer Bike Engine',
+                 fontsize=14, y=0.98)
+
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
+
+    save_path = PLOT_DIR / f"ber_time_series_grid_{split_frequency}Hz.png"
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved BER time-series comparison plot: {save_path}")
 
 # ------------------- Main Execution -------------------
 if __name__ == '__main__':
     print("Loading and processing bike engine sounds...")
-    X, y, bike_names = load_dataset()
+    X, y, mfcc_ary, delta_mfcc_ary, bike_names, specgrm = load_dataset()
 
     n_bikes = len(bike_names)
     n_samples = len(X)
@@ -292,7 +429,16 @@ if __name__ == '__main__':
         np.save(PLOT_DIR / 'bike_names.npy', bike_names)
 
         # Generate comparison plots
-        plot_feature_comparisons(X, bike_names)
+        plot_feature_comparisons(X, y, bike_names, FEATURE_NAMES)
+
+        print("Generating MFCC comparison plots...")
+        plot_mfcc_comparison(mfcc_ary, bike_names, "MFCC")
+
+        print("Generating Delta-MFCC comparison plots...")
+        plot_mfcc_comparison(delta_mfcc_ary, bike_names, "Delta-MFCC")
+
+        print("Generating Band Energy comparison plots...")
+        plot_ber_time_series_grid(specgrm, bike_names, y)
 
         # Train classifier
         print("\nTraining classifier...")
