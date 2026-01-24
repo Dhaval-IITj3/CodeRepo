@@ -16,7 +16,7 @@ Use Torchaudio when you’re building a deep learning model in PyTorch and want 
 
 
 # ---------- CONFIG ----------
-SR = 16000          # sampling rate for all audio
+SR = 22050          # sampling rate for all audio
 N_MFCC = 20         # number of MFCCs to extract
 
 DATA_DIR_NAME = 'Resources'

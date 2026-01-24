@@ -169,8 +169,8 @@ if __name__ == "__main__":
     os.makedirs('Plots', exist_ok=True)
     os.makedirs('Plots/waveform', exist_ok=True)
     os.makedirs('Plots/spectrogram', exist_ok=True)
-    shutil.rmtree(os.path.join('Plots', 'waveform'))
-    shutil.rmtree(os.path.join('Plots', 'spectrogram'))
+    #shutil.rmtree(os.path.join('Plots', 'waveform'))
+    #shutil.rmtree(os.path.join('Plots', 'spectrogram'))
 
     # Step 2: Load Data (assumes folders like 'engine1_before/', etc.)
     features = []

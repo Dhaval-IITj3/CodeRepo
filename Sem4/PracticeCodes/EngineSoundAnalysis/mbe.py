@@ -16,7 +16,7 @@ AFTER_DIR = Path(DATA_DIR, 'After')
 
 
 # Frequency bin configuration
-SR = 16000              # sampling rate
+SR = 22050              # sampling rate
 N_FFT = 1024            # FFT window size
 N_BINS = 16              # number of frequency bins (can tune)
 HOP_LENGTH = 512
