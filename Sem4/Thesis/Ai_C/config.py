@@ -17,7 +17,7 @@ SAMPLE_RATE = 22050
 N_FFT = 1024
 HOP_LENGTH = 512
 WINDOW = "hann"
-MAX_DURATION = 12.0  # seconds
+MAX_DURATION = 9.0  # seconds
 FIXED_SAMPLES = int(SAMPLE_RATE * MAX_DURATION)
 
 # ------------------ Labels ------------------
