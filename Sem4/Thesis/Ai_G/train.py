@@ -3,11 +3,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from model import CNNLSTM  # Import from model.py
+from model import BikeLSTMClassifier  # Import from model.py
+from datetime import datetime
 
 
-def train_model(train_loader, val_loader, num_features, num_epochs=50, patience=5,
-                device='cuda' if torch.cuda.is_available() else 'cpu'):
+def train_model(train_loader, val_loader, model_class, num_features, num_epochs=80, patience=12, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    model = model_class(num_features=num_features, hidden_size=128, num_layers=2).to(device)
     """
     Trains the CNN-LSTM model with early stopping.
 
@@ -21,7 +22,7 @@ def train_model(train_loader, val_loader, num_features, num_epochs=50, patience=
     Returns:
         model: Trained model.
     """
-    model = CNNLSTM(num_features=num_features).to(device)
+    model = model_class(num_features=num_features).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=3)
@@ -31,45 +32,56 @@ def train_model(train_loader, val_loader, num_features, num_epochs=50, patience=
 
     for epoch in range(num_epochs):
         model.train()
-        train_loss, train_acc = 0, 0
-        for features, labels in train_loader:
-            if features is None:
+        model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        for batch in train_loader:
+            if batch[0] is None:  # safety skip
                 continue
-            features, labels = features.to(device), labels.to(device)
-            lengths = torch.tensor([f.size(1) for f in features])  # Original lengths
+            features, labels, lengths = batch  # ← NOW unpack 3 values
+            features = features.to(device)
+            labels = labels.to(device)
+            lengths = lengths.to(device)  # or .cpu() if needed for pack
+
+            optimizer.zero_grad()
             outputs = model(features, lengths)
             loss = criterion(outputs, labels)
 
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item()
-            train_acc += (outputs.argmax(1) == labels).sum().item()
+            preds = outputs.argmax(dim=1)
+            train_correct += (preds == labels).sum().item()
+            train_total += labels.size(0)
 
         train_loss /= len(train_loader)
-        train_acc /= len(train_loader.dataset)
+        train_acc = train_correct / train_total if train_total > 0 else 0.0
 
         # Validation
         model.eval()
-        val_loss, val_acc = 0, 0
+        val_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
-            for features, labels in val_loader:
-                if features is None:
+            for batch in val_loader:
+                if batch[0] is None:
                     continue
-                features, labels = features.to(device), labels.to(device)
-                lengths = torch.tensor([f.size(1) for f in features])
+                features, labels, lengths = batch
+                features = features.to(device)
+                labels = labels.to(device)
+                lengths = lengths.to(device)
+
                 outputs = model(features, lengths)
                 loss = criterion(outputs, labels)
 
                 val_loss += loss.item()
-                val_acc += (outputs.argmax(1) == labels).sum().item()
+                preds = outputs.argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
+                val_total += labels.size(0)
 
         val_loss /= len(val_loader)
-        val_acc /= len(val_loader.dataset)
+        val_acc = val_correct / val_total if val_total > 0 else 0.0
 
-        print(
-            f"Epoch {epoch + 1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        timestamp = datetime.now().strftime("%d%m%Y %H:%M:%S:%f")[:-3]  # up to milliseconds
+        print(f"{timestamp} Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         scheduler.step(val_loss)
 
