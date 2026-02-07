@@ -1,85 +1,76 @@
-# model.py
+# model.py   ← modified to first embed each recording → then LSTM over bike sequence
+
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
-class CNNLSTM(nn.Module):
-    """
-    Hybrid CNN-LSTM model for audio classification.
-    """
+class RecordingEmbedder(nn.Module):
+    """CNN that turns one recording feature map → fixed-size embedding"""
 
-    def __init__(self, num_features, num_classes=3, hidden_size=128, num_layers=2):
-        """
-        Args:
-            num_features (int): Number of input features (height of input).
-            num_classes (int): Number of output classes.
-            hidden_size (int): LSTM hidden size.
-            num_layers (int): Number of LSTM layers.
-        """
-        super(CNNLSTM, self).__init__()
-
-        # CNN front-end
+    def __init__(self, num_features):
+        super().__init__()
         self.cnn = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=1),
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d((2, 2)),
+            nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d((2, 2)),
+            nn.MaxPool2d(2),
 
-            nn.Conv2d(64, 128, kernel_size=(3, 3), padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d((2, 2))
+            nn.MaxPool2d(2),
+
+            nn.AdaptiveAvgPool2d((1, 1))  # global average pooling → fixed size
         )
+        self.flat_dim = 128
 
-        # LSTM back-end
-        self.lstm = nn.LSTM(input_size=128 * (num_features // 8),  # After pooling: height // 8
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            batch_first=True,
-                            bidirectional=False)
+    def forward(self, x):
+        # x: (batch * num_rec, 1, num_feat, num_frames)
+        x = self.cnn(x)  # → (..., 128, 1, 1)
+        x = x.view(x.size(0), -1)  # → (..., 128)
+        return x
 
-        # Output layer
+
+class BikeLSTMClassifier(nn.Module):
+    """
+    Model that:
+    1. Embeds each recording independently with CNN
+    2. Feeds sequence of embeddings to LSTM
+    3. Predicts one label per bike
+    """
+
+    def __init__(self, num_features, hidden_size=128, num_layers=2, num_classes=3):
+        super().__init__()
+        self.embedder = RecordingEmbedder(num_features)
+        self.lstm = nn.LSTM(
+            input_size=128,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=False
+        )
         self.fc = nn.Linear(hidden_size, num_classes)
 
-    def forward(self, x, lengths=None):
-        """
-        Args:
-            x (torch.Tensor): Input features (batch, num_features, num_frames)
-            lengths (torch.Tensor): Original sequence lengths for packing.
+    def forward(self, x, lengths):
+        # x: (batch, max_num_rec, num_features, num_frames)
+        b, max_rec, f, t = x.shape
 
-        Returns:
-            torch.Tensor: Logits (batch, num_classes)
-        """
-        # Add channel dim: (batch, 1, num_features, num_frames)
-        x = x.unsqueeze(1)
+        # Flatten to process each recording independently
+        x_flat = x.view(b * max_rec, 1, f, t)  # (b*max_rec, 1, f, t)
+        embeds = self.embedder(x_flat)  # (b*max_rec, 128)
+        embeds = embeds.view(b, max_rec, -1)  # (b, max_rec, 128)
 
-        # CNN
-        x = self.cnn(x)  # (batch, 128, num_features//8, num_frames//8)
+        # Pack variable-length sequences
+        packed = pack_padded_sequence(embeds, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        lstm_out, (hn, _) = self.lstm(packed)
 
-        # Reshape for LSTM: (batch, num_frames//8, 128 * num_features//8)
-        batch, channels, height, time = x.shape
-        x = x.view(batch, time, channels * height)
-
-        # Pack for LSTM (handle variable lengths)
-        if lengths is not None:
-            lengths = lengths // 8  # Adjust for pooling
-            x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-
-        # LSTM
-        lstm_out, (hn, cn) = self.lstm(x)
-
-        # Get last hidden state
-        if lengths is not None:
-            lstm_out, _ = pad_packed_sequence(lstm_out, batch_first=True)
-        hn = hn[-1]  # Last layer's hidden
-
-        # FC
-        out = self.fc(hn)
-
-        return out
+        # Take last hidden state
+        out = hn[-1]  # (batch, hidden_size)
+        logits = self.fc(out)
+        return logits
