@@ -25,28 +25,33 @@ class BikeSequenceDataset(Dataset):
     Label = degradation state based on the LAST recording in the sequence.
     """
 
-    def __init__(self, bike_to_files, abs_data_root, max_duration_sec=9.0, target_sr=22050, augment=False):
-        self.bike_to_files = bike_to_files  # dict: bike_id → list of absolute paths
-        self.abs_data_root = abs_data_root
-        self.bike_ids = list(bike_to_files.keys())
+    """
+        Returns one bike → sequence of feature tensors + one label (based on last recording)
+        """
+
+    def __init__(self, bike_to_files, max_duration_sec=9.0, target_sr=22050, augment=False):
+        self.bike_to_files = bike_to_files  # dict: bike_name → list of absolute file paths
+        self.bike_names = list(bike_to_files.keys())
         self.max_samples = int(max_duration_sec * target_sr)
         self.target_sr = target_sr
         self.augment = augment
 
     def __len__(self):
-        return len(self.bike_ids)
+        return len(self.bike_names)
 
     def __getitem__(self, idx):
-        bike_id = self.bike_ids[idx]
+        bike_id = self.bike_names[idx]
         file_paths = self.bike_to_files[bike_id]
 
         # Sort by recording number extracted from filename
-        def get_rec_num(p):
-            fname = os.path.basename(p)
+        # Sort files by recording number
+        def get_rec_num(path):
+            fname = os.path.basename(path)
             try:
-                return int(fname.split('_')[-1].replace('.ogg', ''))
+                num = fname.split('_')[-1].replace('.ogg', '')
+                return int(num)
             except:
-                return 0
+                return 9999
 
         file_paths = sorted(file_paths, key=get_rec_num)
 
@@ -113,111 +118,198 @@ def collate_sequences(batch):
     return padded_seq, labels, seq_lengths
 
 
+# ──────────────────────────────────────────────────────────────
+#  Custom split function (no sklearn)
+# ──────────────────────────────────────────────────────────────
+
+def custom_stratified_split(files_with_labels, val_ratio=0.15, test_ratio=0.15):
+    """
+    Input: list of (filepath, label, bike_name)
+    Returns: train_files, val_files, test_files  (each is list of (path, label, bike))
+             All lists are guaranteed non-empty when possible
+    """
+    if not files_with_labels:
+        return [], [], []
+
+    # Group by label
+    label_to_files = defaultdict(list)
+    for item in files_with_labels:
+        label_to_files[item[1]].append(item)
+
+    train, val, test = [], [], []
+
+    # Snapshot to avoid "dictionary changed size" error
+    label_items_pairs = list(label_to_files.items())
+    for label, items in label_items_pairs:
+        train.extend(items[:])
+        random.shuffle(items)  # deterministic via seed
+
+        n = len(items)
+        if n == 0:
+            continue
+        elif n <= 2:
+            train.append(items[0])
+            train.append(items[1])
+            val.append(items[0])   # prefer val over test when very small
+            val.append(items[1])
+        else:
+            n_val  = max(1, round(n * val_ratio))
+            n_test = max(1, round(n * test_ratio))
+            n_train = n - n_val - n_test
+
+            # Ensure non-empty when possible
+            n_train = max(0, n_train)
+
+            val.extend(items[n_train:n_train + n_val])
+            test.extend(items[n_train + n_val:])
+
+    # Fallback: if any set is empty, move one item from the largest set
+    all_sets = [train, val, test]
+    set_names = ["train", "val", "test"]
+
+    for i, s in enumerate(all_sets):
+        if not s:
+            # Find largest non-empty set
+            largest_idx = max(range(3), key=lambda j: len(all_sets[j]) if j != i else -1)
+            if len(all_sets[largest_idx]) > 1:
+                item = all_sets[largest_idx].pop()
+                all_sets[i].append(item)
+                print(f"Moved one sample to empty {set_names[i]} set")
+
+    return train, val, test
+
+
 def prepare_datasets(
-        data_root='Data/TrainData',
-        batch_size=4,
-        splits=(0.70, 0.15, 0.15),
-        max_duration_sec=9.0,
-        target_sr=22050
+    root_dir="Data/TrainData",
+    val_ratio=0.15,
+    test_ratio=0.15,
+    is_training=True,
+    batch_size=4,
+    max_duration_sec=9.0,
+    target_sr=22050
 ):
     """
-    - Collects absolute paths of all .ogg files
-    - Groups by bike folder
-    - Splits individual recordings (not bikes) into train/val/test
-    - Makes physical copies into train/val/test folders
-    - Returns loaders (bike-sequence style)
+    Main entry point.
+    - Copies files to ValidationData/ and TestData/ if needed
+    - Returns train/val/test loaders (train_loader is None if not is_training)
     """
-    abs_data_root = os.path.abspath(data_root)
+    root_dir = os.path.abspath(root_dir)
+    val_dir  = os.path.abspath("Data/ValidationData")
+    test_dir = os.path.abspath("Data/TestData")
 
-    # 1. Collect all absolute paths + labels + bike grouping
-    all_files = []
+    os.makedirs(val_dir,  exist_ok=True)
+    os.makedirs(test_dir, exist_ok=True)
+
+    # ── Collect all files ────────────────────────────────────────
+    all_files = []  # (abs_path, label, bike_name)
     bike_to_files = defaultdict(list)
-    label_list = []  # for stratified split
 
-    for subdir in os.listdir(abs_data_root):
-        subpath = os.path.join(abs_data_root, subdir)
-        if not os.path.isdir(subpath):
+    for bike_folder in os.listdir(root_dir):
+        bike_path = os.path.join(root_dir, bike_folder)
+        if not os.path.isdir(bike_path):
             continue
-        files = [f for f in os.listdir(subpath) if f.lower().endswith('.ogg')]
+
+        files = [f for f in os.listdir(bike_path) if f.lower().endswith('.ogg')]
         if not files:
             continue
 
-        abs_files = [os.path.join(subpath, f) for f in files]
-
-        # Sort by recording number
-        def get_num(fname):
+        files = natsorted(files)  # natural sort by recording number
+        abs_files = []
+        for fname in files:
+            abspath = os.path.join(bike_path, fname)
             try:
-                return int(os.path.basename(fname).split('_')[-1].replace('.ogg', ''))
+                num = int(fname.split('_')[-1].replace('.ogg', ''))
             except:
-                return 9999
+                num = 9999
 
-        sorted_abs_files = natsorted(abs_files, key=get_num)
-        num_files = len(sorted_abs_files)
+            norm_i = (num - 1) / max(1, len(files) - 1) if len(files) > 1 else 0.0
+            label = 0 if norm_i < 0.25 else (1 if norm_i < 0.75 else 2)
 
-        for i, abspath in enumerate(sorted_abs_files):
-            norm_i = i / (num_files - 1) if num_files > 1 else 0.0
-            label = 0 if norm_i < 0.33 else (1 if norm_i < 0.66 else 2)
+            all_files.append((abspath, label, bike_folder))
+            abs_files.append(abspath)
 
-            all_files.append((abspath, label, subdir))  # path, label, bike_id
-            bike_to_files[subdir].append(abspath)
-            label_list.append(label)
+        bike_to_files[bike_folder] = natsorted(abs_files)
 
     if not all_files:
-        raise ValueError("No .ogg files found in the data directory.")
+        raise ValueError("No .ogg files found.")
 
     print(f"Found {len(all_files)} recordings across {len(bike_to_files)} bikes.")
-    print("Class distribution:", Counter(label_list))
+    print("Label distribution:", Counter(l for _, l, _ in all_files))
 
-    # 2. Stratified split of recordings (not bikes)
-    train_files, temp_files, train_labels, temp_labels = train_test_split(
-        all_files, label_list,
-        test_size=splits[1] + splits[2],
-        stratify=label_list,
-        random_state=42
+    # ── Custom split ─────────────────────────────────────────────
+    train_items, val_items, test_items = custom_stratified_split(
+        all_files,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio
     )
 
-    val_files, test_files, val_labels, test_labels = train_test_split(
-        temp_files, temp_labels,
-        test_size=splits[2] / (splits[1] + splits[2]),
-        stratify=temp_labels,
-        random_state=42
+    # ── Copy files to val/test folders ───────────────────────────
+    def copy_to_split(items, target_dir):
+        copied_paths = []
+        for orig_path, label, bike in items:
+            rel = os.path.relpath(orig_path, root_dir)
+            dest = os.path.join(target_dir, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if not os.path.exists(dest):
+                shutil.copy2(orig_path, dest)
+            copied_paths.append(dest)
+        return copied_paths
+
+    val_copied  = copy_to_split(val_items,  val_dir)
+    test_copied = copy_to_split(test_items, test_dir)
+
+    # ── Build bike → files mapping for each split ────────────────
+    def build_bike_mapping(copied_paths):
+        mapping = defaultdict(list)
+        for p in copied_paths:
+            bike = os.path.basename(os.path.dirname(p))
+            mapping[bike].append(p)
+        return mapping
+
+    train_bike_files = bike_to_files if is_training else {}
+    val_bike_files   = build_bike_mapping(val_copied)
+    test_bike_files  = build_bike_mapping(test_copied)
+
+    # ── Create datasets ──────────────────────────────────────────
+    train_ds = BikeSequenceDataset(
+        train_bike_files,
+        max_duration_sec=max_duration_sec,
+        target_sr=target_sr,
+        augment=True
+    ) if is_training and train_bike_files else None
+
+    val_ds = BikeSequenceDataset(
+        val_bike_files,
+        max_duration_sec=max_duration_sec,
+        target_sr=target_sr,
+        augment=False
     )
 
-    # 3. Create directories and copy files (absolute paths preserved in structure)
-    split_dirs = {'train': train_files, 'val': val_files, 'test': test_files}
+    test_ds = BikeSequenceDataset(
+        test_bike_files,
+        max_duration_sec=max_duration_sec,
+        target_sr=target_sr,
+        augment=False
+    )
 
-    for split_name, file_list in split_dirs.items():
-        os.makedirs(split_name, exist_ok=True)
-        for abspath, _, bike_id in file_list:
-            rel_path = os.path.relpath(abspath, abs_data_root)
-            dest_path = os.path.join(split_name, rel_path)
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            shutil.copy2(abspath, dest_path)
+    # ── DataLoaders ──────────────────────────────────────────────
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        collate_fn=collate_sequences
+    ) if train_ds is not None else None
 
-    # 4. Build bike → list of files (now from copied locations)
-    train_bike_files = defaultdict(list)
-    val_bike_files = defaultdict(list)
-    test_bike_files = defaultdict(list)
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        collate_fn=collate_sequences
+    )
 
-    for split_name, file_list in split_dirs.items():
-        target_dict = {'train': train_bike_files, 'val': val_bike_files, 'test': test_bike_files}[split_name]
-        base = os.path.abspath(split_name)
-        for abspath, _, bike_id in file_list:
-            target_dict[bike_id].append(os.path.join(base, os.path.relpath(abspath, abs_data_root)))
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False,
+        collate_fn=collate_sequences
+    )
 
-    # 5. Create datasets
-    train_ds = BikeSequenceDataset(train_bike_files, abs_data_root=abs_data_root, augment=True,
-                                   max_duration_sec=max_duration_sec, target_sr=target_sr)
-    val_ds = BikeSequenceDataset(val_bike_files, abs_data_root=abs_data_root, augment=False,
-                                 max_duration_sec=max_duration_sec, target_sr=target_sr)
-    test_ds = BikeSequenceDataset(test_bike_files, abs_data_root=abs_data_root, augment=False,
-                                  max_duration_sec=max_duration_sec, target_sr=target_sr)
-
-    # 6. DataLoaders — batch_size is configurable
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_sequences)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_sequences)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_sequences)
-
-    print(f"→ Train bikes: {len(train_ds)}, Val bikes: {len(val_ds)}, Test bikes: {len(test_ds)}")
+    print(f"→ Train bikes: {len(train_ds.bike_names) if train_ds else 0}")
+    print(f"→ Val   bikes: {len(val_ds.bike_names)}")
+    print(f"→ Test  bikes: {len(test_ds.bike_names)}")
 
     return train_loader, val_loader, test_loader

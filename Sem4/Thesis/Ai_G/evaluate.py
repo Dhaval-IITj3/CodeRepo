@@ -42,20 +42,20 @@ def evaluate_model(model, test_loader, device='cuda' if torch.cuda.is_available(
     print(f"Test Precision (macro): {prec:.4f}")
     print(f"Test Recall (macro): {rec:.4f}")
     print(f"Test F1-Score (macro): {f1:.4f}")
-    print("\nClassification Report:\n")
+    # print("\nClassification Report:\n")
+    #
+    # # Print classification report
+    # print(f"True labels in test: {sorted(set(all_labels))}")
+    # print(f"Predicted labels in test: {sorted(set(all_preds))}")
 
-    # Print classification report
-    print(f"True labels in test: {sorted(set(all_labels))}")
-    print(f"Predicted labels in test: {sorted(set(all_preds))}")
+    # print(classification_report(
+    #     all_labels,
+    #     all_preds,
+    #     labels=[0, 1, 2],
+    #     target_names=['Fresh', 'Moderate', 'Degraded'],
+    #     zero_division=0,
+    #     digits=4
+    # ))
 
-    print(classification_report(
-        all_labels,
-        all_preds,
-        labels=[0, 1, 2],
-        target_names=['Fresh', 'Moderate', 'Degraded'],
-        zero_division=0,
-        digits=4
-    ))
-
-    print("True class counts:", Counter(all_labels))
-    print("Predicted class counts:", Counter(all_preds))
+    # print("True class counts:", Counter(all_labels))
+    # print("Predicted class counts:", Counter(all_preds))
